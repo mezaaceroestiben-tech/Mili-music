@@ -1,0 +1,149 @@
+name: Panel Build - Android Gradle
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    env:
+      EMM_FIRMA: ${{ secrets.EMM_FIRMA }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extraer código fuente (ZIP)
+        shell: bash
+        run: |
+          if [ -f .emm/fuente_dir.txt ]; then
+            D=$(tr -d '\r\n' < .emm/fuente_dir.txt)
+            cat "$D"/p* > fuente.zip
+            rm -rf "$D" .emm/fuente_dir.txt
+          fi
+          rm -rf _src && mkdir _src
+          if command -v unzip >/dev/null 2>&1; then unzip -q -o fuente.zip -d _src; else 7z x -y -o_src fuente.zip >/dev/null; fi
+          rm -rf _src/__MACOSX
+          if [ "$(ls -A _src | wc -l)" = "1" ] && [ -d "_src/$(ls -A _src)" ]; then
+            cp -a "_src/$(ls -A _src)/." .
+          else
+            cp -a _src/. .
+          fi
+          rm -rf _src fuente.zip
+      - name: Detectar versión de Java y variante
+        shell: bash
+        run: |
+          python3 - <<'PYEOF'
+          import re, glob, os
+          def ver(a, b):
+              return int(b) if (a == "1" and b) else int(a)
+          v = 0
+          archivos = glob.glob("**/*.gradle", recursive=True) + glob.glob("**/*.gradle.kts", recursive=True)
+          for f in archivos:
+              try:
+                  t = open(f, encoding="utf-8", errors="ignore").read()
+              except Exception:
+                  continue
+              for a, b in re.findall(r"(?:VERSION|JVM)_(\d+)(?:_(\d+))?", t):
+                  v = max(v, ver(a, b))
+              for a in re.findall(r"jvmToolchain\(\s*(\d+)\s*\)", t):
+                  v = max(v, int(a))
+          jv = max(17, v)
+          flavor = ""
+          if os.path.exists(".emm/variante.txt"):
+              flavor = open(".emm/variante.txt", encoding="utf-8").read().strip()
+          else:
+              app = None
+              for c in ["app/build.gradle.kts", "app/build.gradle"] + archivos:
+                  if os.path.exists(c) and "com.android.application" in open(c, encoding="utf-8", errors="ignore").read():
+                      app = c
+                      break
+              if app:
+                  t = open(app, encoding="utf-8", errors="ignore").read()
+                  dim = re.search(r"flavorDimensions[^\n]*", t)
+                  i = t.find("productFlavors")
+                  if dim and i >= 0 and len(re.findall(r"[\"'](\w+)[\"']", dim.group(0))) == 1:
+                      j = t.find("{", i)
+                      nivel = 0
+                      k = j
+                      nombres = []
+                      while k < len(t):
+                          c = t[k]
+                          if c == "{":
+                              nivel += 1
+                          elif c == "}":
+                              nivel -= 1
+                              if nivel == 0:
+                                  break
+                          k += 1
+                      bloque = t[j:k]
+                      nivel = 0
+                      for linea in bloque.split("\n"):
+                          if nivel == 1:
+                              m = re.search(r"(?:create|register)\(\s*[\"'](\w+)[\"']\s*\)", linea) or re.match(r"\s*(\w+)\s*\{", linea)
+                              if m:
+                                  nombres.append(m.group(1))
+                          nivel += linea.count("{") - linea.count("}")
+                      for pref in ["izzy", "foss", "gms"]:
+                          if pref in nombres:
+                              flavor = pref
+                              break
+                      else:
+                          flavor = nombres[0] if nombres else ""
+          flavor = flavor[:1].upper() + flavor[1:]
+          print("Java:", jv, "| variante:", flavor or "(ninguna)")
+          with open(os.environ["GITHUB_ENV"], "a") as e:
+              e.write("JV=" + str(jv) + "\n")
+              e.write("EMM_FLAVOR=" + flavor + "\n")
+          PYEOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JV }}
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compilar APK
+        run: |
+          G=gradle
+          if [ -f gradlew ]; then chmod +x gradlew; G=./gradlew; fi
+          F="${EMM_FLAVOR:-}"
+          if [ -n "${EMM_FIRMA:-}" ]; then
+            echo "Compilando assemble${F}Release"
+            $G "assemble${F}Release" --no-daemon --console=plain
+          else
+            echo "Compilando assemble${F}Debug"
+            $G "assemble${F}Debug" --no-daemon --console=plain
+          fi
+      - name: Firmar APK con la firma propia
+        if: env.EMM_FIRMA != ''
+        shell: bash
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          KS="$RUNNER_TEMP/firma.jks"
+          printf '%s\n' "$EMM_FIRMA" | sed -n 1p | base64 -d > "$KS"
+          export KSPASS=$(printf '%s\n' "$EMM_FIRMA" | sed -n 2p)
+          ALIAS=$(printf '%s\n' "$EMM_FIRMA" | sed -n 3p)
+          export KEYPASS=$(printf '%s\n' "$EMM_FIRMA" | sed -n 4p)
+          find . -type f -name '*.apk' -not -path './.git/*' -print0 | while IFS= read -r -d '' APK; do
+            "$BT/zipalign" -f -p 4 "$APK" "$APK.tmp" && mv "$APK.tmp" "$APK"
+            "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$ALIAS" --ks-pass env:KSPASS --key-pass env:KEYPASS "$APK"
+            "$BT/apksigner" verify --print-certs "$APK" | head -n 3
+            NUEVO="${APK/-unsigned/-firmado}"
+            if [ "$NUEVO" != "$APK" ]; then mv "$APK" "$NUEVO"; fi
+          done
+          rm -f "$KS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-android
+          path: '**/build/outputs/apk/**/*.apk'
+          if-no-files-found: error
+  publicar:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefactos
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: artefactos/**/*
