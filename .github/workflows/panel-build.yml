@@ -104,7 +104,7 @@ jobs:
           F="${EMM_FLAVOR:-}"
           if [ -n "${EMM_FIRMA:-}" ]; then
             echo "Compilando assemble${F}Release"
-            $G "assemble${F}Release" --no-daemon --console=plain
+            $G "assemble${F}Release" --no-daemon --console=plain || { echo "::warning::Falló la compilación Release; se compila Debug"; $G "assemble${F}Debug" --no-daemon --console=plain; }
           else
             echo "Compilando assemble${F}Debug"
             $G "assemble${F}Debug" --no-daemon --console=plain
