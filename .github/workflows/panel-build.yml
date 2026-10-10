@@ -128,27 +128,40 @@ jobs:
             if [ "$NUEVO" != "$APK" ]; then mv "$APK" "$NUEVO"; fi
           done
           rm -f "$KS"
-      - name: Nombrar el APK con el nombre de la app
+      - name: Nombrar el APK (nombre elegido o nombre de la app)
         shell: bash
         run: |
           NOMBRE=""
           VER=""
+          APKN=""
           if [ -f .emm/personalizacion.json ]; then
             NOMBRE=$(python3 -c "import json;print((json.load(open('.emm/personalizacion.json',encoding='utf-8')).get('app_name') or '').strip())")
             VER=$(python3 -c "import json;print((json.load(open('.emm/personalizacion.json',encoding='utf-8')).get('version_name') or '').strip())")
+            APKN=$(python3 -c "import json,re,unicodedata as u;n=(json.load(open('.emm/personalizacion.json',encoding='utf-8')).get('apk_nombre') or '').strip();n=re.sub(r'\.[aA][pP][kK]\s*\$','',n);n=u.normalize('NFKD',n).encode('ascii','ignore').decode();n=re.sub(r'[^A-Za-z0-9._-]+','_',n).strip('_.');print(n)")
           fi
-          if [ -z "$NOMBRE" ]; then NOMBRE="${GITHUB_REPOSITORY#*/}"; fi
-          SLUG=$(printf '%s' "$NOMBRE" | tr -c 'A-Za-z0-9._-' '_' | sed 's/__*/_/g;s/^_//;s/_$//')
-          VSLUG=$(printf '%s' "$VER" | tr -c 'A-Za-z0-9._-' '_')
-          PREF="$SLUG"
-          if [ -n "$VSLUG" ]; then PREF="$SLUG-$VSLUG"; fi
-          find . -type f -name '*.apk' -not -path './.git/*' -print0 | while IFS= read -r -d '' APK; do
-            D=$(dirname "$APK")
-            B=$(basename "$APK")
-            case "$B" in "$SLUG"-*) continue ;; esac
-            mv "$APK" "$D/$PREF-${B#app-}"
-            echo "APK: $PREF-${B#app-}"
-          done
+          if [ -n "$APKN" ]; then
+            TOTAL=$(find . -type f -name '*.apk' -not -path './.git/*' | wc -l)
+            find . -type f -name '*.apk' -not -path './.git/*' -print0 | while IFS= read -r -d '' APK; do
+              D=$(dirname "$APK")
+              B=$(basename "$APK")
+              if [ "$TOTAL" -eq 1 ]; then DEST="$D/$APKN.apk"; else DEST="$D/$APKN-${B#app-}"; fi
+              if [ "$APK" != "$DEST" ]; then mv "$APK" "$DEST"; fi
+              echo "APK: $(basename "$DEST")"
+            done
+          else
+            if [ -z "$NOMBRE" ]; then NOMBRE="${GITHUB_REPOSITORY#*/}"; fi
+            SLUG=$(printf '%s' "$NOMBRE" | tr -c 'A-Za-z0-9._-' '_' | sed 's/__*/_/g;s/^_//;s/_$//')
+            VSLUG=$(printf '%s' "$VER" | tr -c 'A-Za-z0-9._-' '_')
+            PREF="$SLUG"
+            if [ -n "$VSLUG" ]; then PREF="$SLUG-$VSLUG"; fi
+            find . -type f -name '*.apk' -not -path './.git/*' -print0 | while IFS= read -r -d '' APK; do
+              D=$(dirname "$APK")
+              B=$(basename "$APK")
+              case "$B" in "$SLUG"-*) continue ;; esac
+              mv "$APK" "$D/$PREF-${B#app-}"
+              echo "APK: $PREF-${B#app-}"
+            done
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: apk-android
