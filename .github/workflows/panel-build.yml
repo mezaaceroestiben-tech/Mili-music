@@ -97,6 +97,26 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JV }}
       - uses: gradle/actions/setup-gradle@v4
+      - name: Preparar compilación universal (32 y 64 bits)
+        shell: bash
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/emm-universal.gradle <<'GRADLEEOF'
+          allprojects { p ->
+            p.afterEvaluate {
+              def android = p.extensions.findByName('android')
+              if (android != null && p.plugins.hasPlugin('com.android.application')) {
+                try { android.defaultConfig.ndk.abiFilters.clear() } catch (Throwable e) { println "EMM: sin filtros ABI en defaultConfig: " + e }
+                try { android.productFlavors.each { it.ndk.abiFilters.clear() } } catch (Throwable e) { }
+                try { android.buildTypes.each { it.ndk.abiFilters.clear() } } catch (Throwable e) { }
+                try { android.defaultConfig.externalNativeBuild.cmake.abiFilters.clear() } catch (Throwable e) { }
+                try { android.defaultConfig.externalNativeBuild.ndkBuild.abiFilters.clear() } catch (Throwable e) { }
+                try { android.splits.abi.enable = false } catch (Throwable e) { }
+                println "EMM: APK universal (todas las arquitecturas) en " + p.path
+              }
+            }
+          }
+          GRADLEEOF
       - name: Compilar APK
         run: |
           G=gradle
