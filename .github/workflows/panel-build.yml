@@ -117,6 +117,27 @@ jobs:
             }
           }
           GRADLEEOF
+      - name: Activar ofuscación y reducción de código (R8/ProGuard)
+        shell: bash
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/emm-minify.gradle <<'GRADLEEOF'
+          allprojects { p ->
+            p.afterEvaluate {
+              def android = p.extensions.findByName('android')
+              if (android != null && p.plugins.hasPlugin('com.android.application')) {
+                try {
+                  android.buildTypes.release.minifyEnabled true
+                  android.buildTypes.release.shrinkResources true
+                  if (!android.buildTypes.release.proguardFiles || android.buildTypes.release.proguardFiles.isEmpty()) {
+                    android.buildTypes.release.proguardFiles(android.getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
+                  }
+                  println "EMM: ofuscación (R8) activada en " + p.path
+                } catch (Throwable e) { println "EMM: no se pudo activar ofuscación en " + p.path + ": " + e }
+              }
+            }
+          }
+          GRADLEEOF
       - name: Compilar APK
         run: |
           G=gradle
@@ -148,40 +169,87 @@ jobs:
             if [ "$NUEVO" != "$APK" ]; then mv "$APK" "$NUEVO"; fi
           done
           rm -f "$KS"
-      - name: Nombrar el APK (nombre elegido o nombre de la app)
+      - name: Nombrar el APK (nombre, versión, arquitectura según tu elección)
         shell: bash
         run: |
-          NOMBRE=""
-          VER=""
-          APKN=""
-          if [ -f .emm/personalizacion.json ]; then
-            NOMBRE=$(python3 -c "import json;print((json.load(open('.emm/personalizacion.json',encoding='utf-8')).get('app_name') or '').strip())")
-            VER=$(python3 -c "import json;print((json.load(open('.emm/personalizacion.json',encoding='utf-8')).get('version_name') or '').strip())")
-            APKN=$(python3 -c "import json,re,unicodedata as u;n=(json.load(open('.emm/personalizacion.json',encoding='utf-8')).get('apk_nombre') or '').strip();n=re.sub(r'\.[aA][pP][kK]\s*\$','',n);n=u.normalize('NFKD',n).encode('ascii','ignore').decode();n=re.sub(r'[^A-Za-z0-9._-]+','_',n).strip('_.');print(n)")
-          fi
-          if [ -n "$APKN" ]; then
-            TOTAL=$(find . -type f -name '*.apk' -not -path './.git/*' | wc -l)
-            find . -type f -name '*.apk' -not -path './.git/*' -print0 | while IFS= read -r -d '' APK; do
-              D=$(dirname "$APK")
-              B=$(basename "$APK")
-              if [ "$TOTAL" -eq 1 ]; then DEST="$D/$APKN.apk"; else DEST="$D/$APKN-${B#app-}"; fi
-              if [ "$APK" != "$DEST" ]; then mv "$APK" "$DEST"; fi
-              echo "APK: $(basename "$DEST")"
-            done
-          else
-            if [ -z "$NOMBRE" ]; then NOMBRE="${GITHUB_REPOSITORY#*/}"; fi
-            SLUG=$(printf '%s' "$NOMBRE" | tr -c 'A-Za-z0-9._-' '_' | sed 's/__*/_/g;s/^_//;s/_$//')
-            VSLUG=$(printf '%s' "$VER" | tr -c 'A-Za-z0-9._-' '_')
-            PREF="$SLUG"
-            if [ -n "$VSLUG" ]; then PREF="$SLUG-$VSLUG"; fi
-            find . -type f -name '*.apk' -not -path './.git/*' -print0 | while IFS= read -r -d '' APK; do
-              D=$(dirname "$APK")
-              B=$(basename "$APK")
-              case "$B" in "$SLUG"-*) continue ;; esac
-              mv "$APK" "$D/$PREF-${B#app-}"
-              echo "APK: $PREF-${B#app-}"
-            done
-          fi
+          python3 - <<'PYEOF'
+          import json, os, re, glob, zipfile, unicodedata
+          
+          CFG = {}
+          try:
+            CFG = json.load(open(".emm/personalizacion.json", encoding="utf-8"))
+          except Exception:
+            pass
+          
+          def limpiar(t):
+            t = re.sub(r"\.[aA][pP][kK]\s*$", "", (t or "").strip())
+            t = unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode()
+            t = re.sub(r"\s+", "-", t)
+            t = re.sub(r"[^A-Za-z0-9._-]+", "_", t)
+            return t.strip("_.-")
+          
+          base = limpiar(CFG.get("apk_nombre")) or limpiar(CFG.get("app_name")) or limpiar(os.environ.get("GITHUB_REPOSITORY", "app").split("/")[-1]) or "app"
+          ver = limpiar(CFG.get("version_name"))
+          partes = CFG.get("apk_partes")
+          if not isinstance(partes, list):
+            partes = ["version"]
+          usar_ver = "version" in partes and ver != ""
+          usar_arq = "arq" in partes
+          usar_disp = "dispositivo" in partes
+          
+          RUIDO = {"release", "unsigned", "firmado", "signed", "aligned", "debug", "app"}
+          
+          def arquitectura(ruta):
+            try:
+              abis = set()
+              for n in zipfile.ZipFile(ruta).namelist():
+                m = re.match(r"lib/([^/]+)/", n)
+                if m:
+                  abis.add(m.group(1))
+              if not abis or len(abis) > 1:
+                return "universal"
+              return abis.pop()
+            except Exception:
+              return "universal"
+          
+          apks = [p for p in glob.glob("**/*.apk", recursive=True) if not p.startswith(".git/")]
+          info = []
+          for p in apks:
+            b = os.path.basename(p)[:-4]
+            toks = [t for t in re.split(r"-", b) if t and t.lower() not in RUIDO]
+            disp = ""
+            if "telefono-y-tv" in b:
+              disp = "telefono-y-tv"
+            elif re.search(r"(^|-)tv(-|$)", b):
+              disp = "tv"
+            elif "telefono" in b:
+              disp = "telefono"
+            info.append((p, disp, arquitectura(p)))
+          
+          varios = len(info) > 1
+          usados = set()
+          for p, disp, arq in info:
+            d = os.path.dirname(p)
+            partes_n = [base]
+            if usar_ver:
+              partes_n.append(ver)
+            if usar_arq:
+              partes_n.append(arq)
+            if usar_disp or (varios and disp):
+              partes_n.append(disp) if disp else None
+            dest = os.path.join(d, "-".join(partes_n) + ".apk")
+            if dest in usados or (os.path.exists(dest) and dest != p):
+              extra = [t for t in (disp, arq) if t and t not in partes_n]
+              dest = os.path.join(d, "-".join(partes_n + extra) + ".apk")
+            n = 2
+            while dest in usados or (os.path.exists(dest) and dest != p):
+              dest = os.path.join(d, "-".join(partes_n + [str(n)]) + ".apk")
+              n += 1
+            usados.add(dest)
+            if dest != p:
+              os.rename(p, dest)
+            print("APK: " + os.path.basename(dest))
+          PYEOF
       - uses: actions/upload-artifact@v4
         with:
           name: apk-android
@@ -198,6 +266,7 @@ jobs:
           path: artefactos
       - uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.EMM_PUBLICAR || secrets.GITHUB_TOKEN }}
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
           files: artefactos/**/*
