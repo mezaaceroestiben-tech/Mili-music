@@ -26,6 +26,148 @@ jobs:
             cp -a _src/. .
           fi
           rm -rf _src fuente.zip
+      - name: Aplicar personalizacion (nombre, paquete, version, icono)
+        shell: bash
+        run: |
+          python3 - <<'PYEOF'
+          import json, re, glob, os, subprocess, sys
+          CFG = ".emm/personalizacion.json"
+          ICONO = ".emm/icono.png"
+          if not os.path.exists(CFG):
+              print("Sin config de personalizacion, se omite.")
+              sys.exit(0)
+          cfg = json.load(open(CFG, encoding="utf-8"))
+          nombre = (cfg.get("app_name") or "").strip()
+          pkg = (cfg.get("package_id") or "").strip()
+          vname = (cfg.get("version_name") or "").strip()
+          vcode = str(cfg.get("version_code") or "").strip()
+          novedades = (cfg.get("novedades") or "").strip()
+          repo_act = (cfg.get("repo_actualizaciones") or "").strip()
+          if repo_act and os.environ.get("GITHUB_ENV"):
+              with open(os.environ["GITHUB_ENV"], "a") as e:
+                  e.write("UPDATE_REPO=" + repo_act + "\n")
+          if novedades:
+              def esc(t):
+                  t = t.replace("\\", "\\\\").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                  t = t.replace("'", "\\'").replace('"', '\\"').replace("%", "\uff05")
+                  t = t.replace("@", "\\@").replace("?", "\\?")
+                  return "\\n".join(l.strip() for l in t.splitlines())
+              cuerpo = esc(novedades)
+              n_nov = 0
+              for f in glob.glob("**/res/values/*.xml", recursive=True):
+                  s = open(f, encoding="utf-8").read()
+                  s2, n = re.subn(r'(<string name="welcome_last_update_body">)[\s\S]*?(</string>)', lambda m: m.group(1) + cuerpo + m.group(2), s)
+                  if n:
+                      open(f, "w", encoding="utf-8").write(s2)
+                      n_nov += n
+              print("Novedades aplicadas en " + str(n_nov) + " archivo(s).")
+          def reemplazar(patron, repl, texto, flags=0, count=0):
+              return re.subn(patron, repl, texto, count=count, flags=flags)
+          if os.path.exists("buildozer.spec"):
+              txt = open("buildozer.spec", encoding="utf-8").read()
+              def set_ini(txt, clave, valor):
+                  if not valor:
+                      return txt
+                  patron = re.compile(r"^" + re.escape(clave) + r"\s*=.*$", re.M)
+                  linea = clave + " = " + valor
+                  nuevo, n = patron.subn(lambda m: linea, txt)
+                  return nuevo if n else (txt.rstrip("\n") + "\n" + linea + "\n")
+              txt = set_ini(txt, "title", nombre)
+              if pkg and "." in pkg:
+                  dominio, nombrepkg = pkg.rsplit(".", 1)
+                  txt = set_ini(txt, "package.domain", dominio)
+                  txt = set_ini(txt, "package.name", nombrepkg)
+              txt = set_ini(txt, "version", vname)
+              if os.path.exists(ICONO):
+                  os.makedirs("data", exist_ok=True)
+                  subprocess.run(["cp", ICONO, "data/icon.png"], check=False)
+                  txt = set_ini(txt, "icon.filename", "%(source.dir)s/data/icon.png")
+              open("buildozer.spec", "w", encoding="utf-8").write(txt)
+              print("Personalizacion aplicada (Kivy/buildozer).")
+              sys.exit(0)
+          cambios = 0
+          cambios_nombre = 0
+          if nombre:
+              xml_nombre = nombre.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+              if xml_nombre[:1] in ("@", "?"):
+                  xml_nombre = "\\" + xml_nombre
+              g_nombre = nombre.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+              patron_xml = re.compile(r'(<string\b[^>]*\bname="app_name"[^>]*>)[^<]*(</string>)')
+              for f in glob.glob("**/res/values*/*.xml", recursive=True):
+                  if "/build/" in f.replace("\\", "/") or f.startswith("build/"):
+                      continue
+                  s = open(f, encoding="utf-8").read()
+                  if 'name="app_name"' not in s:
+                      continue
+                  s2, n = patron_xml.subn(lambda m: m.group(1) + xml_nombre + m.group(2), s)
+                  if n:
+                      open(f, "w", encoding="utf-8").write(s2); cambios += n; cambios_nombre += n
+              def poner_nombre_gradle(m):
+                  sufijo = " Debug" if "Debug" in m.group(2) else ""
+                  return m.group(1) + '"' + g_nombre + sufijo + '"' + m.group(3)
+              patron_g = re.compile(r'(resValue\(\s*"string"\s*,\s*"app_name"\s*,\s*)(.*?)(\)[ \t]*$)', re.M)
+              patron_g2 = re.compile(r'''(resValue\s+["']string["']\s*,\s*["']app_name["']\s*,\s*)(["'][^"'\n]*["'])()''')
+              for f in glob.glob("**/build.gradle*", recursive=True):
+                  if "/build/" in f.replace("\\", "/") or f.startswith("build/"):
+                      continue
+                  s = open(f, encoding="utf-8").read()
+                  if "app_name" not in s:
+                      continue
+                  s2, n1 = patron_g.subn(poner_nombre_gradle, s)
+                  s2, n2 = patron_g2.subn(poner_nombre_gradle, s2)
+                  if n1 + n2:
+                      open(f, "w", encoding="utf-8").write(s2); cambios += n1 + n2; cambios_nombre += n1 + n2
+              def etiqueta_app(m):
+                  return re.sub(r'android:label="(?!@)[^"]*"', lambda k: 'android:label="' + xml_nombre + '"', m.group(0), count=1)
+              for f in glob.glob("**/AndroidManifest.xml", recursive=True):
+                  if "/build/" in f.replace("\\", "/") or f.startswith("build/"):
+                      continue
+                  s = open(f, encoding="utf-8").read()
+                  s2 = re.sub(r'<application\b[^>]*>', etiqueta_app, s, count=1)
+                  if s2 != s:
+                      open(f, "w", encoding="utf-8").write(s2); cambios += 1; cambios_nombre += 1
+              print("Nombre de la app: " + nombre + " (" + str(cambios_nombre) + " sitio(s) cambiados).")
+              if cambios_nombre == 0:
+                  print("::warning::No encontre donde poner el nombre de la app; se queda el original.")
+              if os.path.exists("android") and os.path.exists("pubspec.yaml"):
+                  for f in glob.glob("android/**/AndroidManifest.xml", recursive=True):
+                      s = open(f, encoding="utf-8").read()
+                      s2, n = reemplazar(r'android:label="[^"]*"', 'android:label="' + nombre + '"', s)
+                      if n:
+                          open(f, "w", encoding="utf-8").write(s2); cambios += n
+          if pkg:
+              for f in glob.glob("**/build.gradle*", recursive=True):
+                  s = open(f, encoding="utf-8").read()
+                  s2, n = reemplazar(r'(\b(?:base)?[aA]pplicationId\s*=?\s*["\'])[^"\']*(["\'])', lambda m: m.group(1) + pkg + m.group(2), s, count=1)
+                  if n:
+                      open(f, "w", encoding="utf-8").write(s2); cambios += n
+          if vname:
+              for f in glob.glob("**/build.gradle*", recursive=True):
+                  s = open(f, encoding="utf-8").read()
+                  s2, n = reemplazar(r'(\bversionName\s*=?\s*["\'])[^"\']*(["\'])', lambda m: m.group(1) + vname + m.group(2), s, count=1)
+                  if n:
+                      open(f, "w", encoding="utf-8").write(s2); cambios += n
+              if os.path.exists("pubspec.yaml"):
+                  s = open("pubspec.yaml", encoding="utf-8").read()
+                  codigo = vcode or "1"
+                  s2, n = reemplazar(r'^version:\s*.*$', lambda m: "version: " + vname + "+" + codigo, s, flags=re.M)
+                  if n:
+                      open("pubspec.yaml", "w", encoding="utf-8").write(s2); cambios += n
+          if vcode:
+              for f in glob.glob("**/build.gradle*", recursive=True):
+                  s = open(f, encoding="utf-8").read()
+                  s2, n = reemplazar(r'(\bversionCode\s*=?\s*)\d+', lambda m: m.group(1) + vcode, s, count=1)
+                  if n:
+                      open(f, "w", encoding="utf-8").write(s2); cambios += n
+          if os.path.exists(ICONO):
+              tamanos = {"mipmap-mdpi": 48, "mipmap-hdpi": 72, "mipmap-xhdpi": 96, "mipmap-xxhdpi": 144, "mipmap-xxxhdpi": 192}
+              for carpeta, px in tamanos.items():
+                  for d in glob.glob("**/" + carpeta, recursive=True):
+                      for nombre_ic in ("ic_launcher.png", "ic_launcher_round.png"):
+                          subprocess.run(["convert", ICONO, "-resize", str(px) + "x" + str(px) + "!", os.path.join(d, nombre_ic)], check=False)
+                          cambios += 1
+          print("Personalizacion aplicada: " + str(cambios) + " cambio(s).")
+          PYEOF
       - name: Detectar versión de Java y variante
         shell: bash
         run: |
@@ -255,18 +397,45 @@ jobs:
           name: apk-android
           path: '**/build/outputs/apk/**/*.apk'
           if-no-files-found: error
-  publicar:
+  publicar_actualizacion:
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .emm
+      - name: Leer los datos de la versión
+        id: info
+        shell: bash
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          cfg = {}
+          try:
+              cfg = json.load(open(".emm/personalizacion.json", encoding="utf-8"))
+          except Exception:
+              pass
+          app = (cfg.get("app_name") or os.environ["GITHUB_REPOSITORY"].split("/")[1]).strip()
+          ver = (cfg.get("version_name") or "").strip()
+          tag = ("v" + ver) if ver else ("build-" + os.environ["GITHUB_RUN_NUMBER"])
+          titulo = (app + " " + ver) if ver else (app + " " + tag)
+          notas = (cfg.get("novedades") or "").strip() or ("Versión " + tag)
+          pub = (cfg.get("publicador") or "").strip()
+          if pub:
+            notas = notas + "\n\n— Publicado por " + pub
+          open("notas.md", "w", encoding="utf-8").write(notas + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as o:
+              o.write("tag=" + tag + "\n")
+              o.write("titulo=" + titulo + "\n")
+          PYEOF
       - uses: actions/download-artifact@v4
         with:
           path: artefactos
       - uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.EMM_PUBLICAR || secrets.GITHUB_TOKEN }}
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
-          files: artefactos/**/*
+          repository: mezaaceroestiben-tech/Mili-music
+          token: ${{ secrets.EMM_PUBLICAR }}
+          tag_name: ${{ steps.info.outputs.tag }}
+          name: ${{ steps.info.outputs.titulo }}
+          body_path: notas.md
+          files: artefactos/**/*.apk
