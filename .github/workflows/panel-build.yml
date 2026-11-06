@@ -259,27 +259,6 @@ jobs:
             }
           }
           GRADLEEOF
-      - name: Activar ofuscación y reducción de código (R8/ProGuard)
-        shell: bash
-        run: |
-          mkdir -p ~/.gradle/init.d
-          cat > ~/.gradle/init.d/emm-minify.gradle <<'GRADLEEOF'
-          allprojects { p ->
-            p.afterEvaluate {
-              def android = p.extensions.findByName('android')
-              if (android != null && p.plugins.hasPlugin('com.android.application')) {
-                try {
-                  android.buildTypes.release.minifyEnabled true
-                  android.buildTypes.release.shrinkResources true
-                  if (!android.buildTypes.release.proguardFiles || android.buildTypes.release.proguardFiles.isEmpty()) {
-                    android.buildTypes.release.proguardFiles(android.getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
-                  }
-                  println "EMM: ofuscación (R8) activada en " + p.path
-                } catch (Throwable e) { println "EMM: no se pudo activar ofuscación en " + p.path + ": " + e }
-              }
-            }
-          }
-          GRADLEEOF
       - name: Compilar APK
         run: |
           G=gradle
