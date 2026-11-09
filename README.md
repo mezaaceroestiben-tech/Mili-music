@@ -3,6 +3,6 @@
 
 
 **ID de paquete:** `com.estiben.milimusic`
-**Versión:** 2.8.9
+**Versión:** 3.0.0
 
 Proyecto generado y mantenido con E m Master Manager.
